@@ -12,6 +12,7 @@ import {
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk"
 import { createRemoteLinkStep, useRemoteQueryStep } from "../../common"
+import { acquireLockStep, releaseLockStep } from "../../locking"
 import {
   createPaymentAccountHolderStep,
   createPaymentSessionStep,
@@ -76,6 +77,17 @@ export const createPaymentSessionsWorkflow = createWorkflow(
   (
     input: WorkflowData<CreatePaymentSessionsWorkflowInput>
   ): WorkflowResponse<PaymentSessionDTO> => {
+    // Reading the collection's sessions, deleting them and creating the new one
+    // must not interleave with another request for the same collection (a
+    // storefront retry or double submit): otherwise both requests delete only
+    // what they read and each creates a session, leaving two active sessions,
+    // and cart completion may authorize the one the customer didn't pay.
+    acquireLockStep({
+      key: input.payment_collection_id,
+      timeout: 30,
+      ttl: 60,
+    })
+
     const paymentCollection = useRemoteQueryStep({
       entry_point: "payment_collection",
       fields: [
@@ -224,6 +236,10 @@ export const createPaymentSessionsWorkflow = createWorkflow(
     })
 
     const created = createPaymentSessionStep(paymentSessionInput)
+
+    releaseLockStep({
+      key: input.payment_collection_id,
+    })
 
     return new WorkflowResponse(created)
   }
