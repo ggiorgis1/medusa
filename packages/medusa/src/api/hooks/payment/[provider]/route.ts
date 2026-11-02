@@ -36,7 +36,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
     const eventBus = req.scope.resolve(Modules.EVENT_BUS)
 
-    // we delay the processing of the event to avoid a conflict caused by a race condition
+    // We delay the processing of the event to avoid a conflict caused by a race condition.
+    // The provider has been told the event was received (200 below) and won't send it
+    // again, so processing must outlast short outages of the provider or the database:
+    // retry with exponential backoff rather than a few immediate attempts.
     await eventBus.emit(
       {
         name: PaymentWebhookEvents.WebhookReceived,
@@ -44,7 +47,11 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       },
       {
         delay: options.webhook_delay || 5000,
-        attempts: options.webhook_retries || 3,
+        attempts: options.webhook_retries || 10,
+        backoff: {
+          type: "exponential",
+          delay: options.webhook_retry_delay || 2000,
+        },
       }
     )
   } catch (err) {

@@ -1527,7 +1527,16 @@ export interface PaymentModuleOptions {
   /**
    * The number of times to retry the webhook event processing in case of an error.
    *
-   * @defaultValue 3
+   * @defaultValue 10
    */
   webhook_retries?: number
+
+  /**
+   * The base delay in milliseconds between retries of the webhook event processing.
+   * Retries back off exponentially (2s, 4s, 8s, ... with the default), so the
+   * default settings keep retrying for about 17 minutes.
+   *
+   * @defaultValue 2000
+   */
+  webhook_retry_delay?: number
 }
