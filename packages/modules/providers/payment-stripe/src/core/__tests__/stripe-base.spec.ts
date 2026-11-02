@@ -121,6 +121,85 @@ describe("StripeBase", () => {
     })
   })
 
+  describe("capturePayment", () => {
+    it("captures exactly the requested amount (partial capture)", async () => {
+      const service = new StripeProviderService({}, defaultOptions)
+      const capture = jest
+        .spyOn(service["stripe_"].paymentIntents, "capture")
+        .mockResolvedValue({ id: "pi_123", status: "succeeded" } as any)
+
+      await service.capturePayment({
+        data: { id: "pi_123", currency: "usd", amount: 3000 },
+        amount: 10,
+        context: { idempotency_key: "capt_1" },
+      })
+
+      expect(capture).toHaveBeenCalledWith(
+        "pi_123",
+        { amount_to_capture: 1000 },
+        { idempotencyKey: "capt_1" }
+      )
+    })
+
+    it("captures the full amount when no amount is given", async () => {
+      const service = new StripeProviderService({}, defaultOptions)
+      const capture = jest
+        .spyOn(service["stripe_"].paymentIntents, "capture")
+        .mockResolvedValue({ id: "pi_123", status: "succeeded" } as any)
+
+      await service.capturePayment({ data: { id: "pi_123", currency: "usd" } })
+
+      expect(capture).toHaveBeenCalledWith("pi_123", {}, {
+        idempotencyKey: undefined,
+      })
+    })
+
+    const unexpectedState = (intent: Record<string, unknown>) =>
+      Object.assign(new Error("Unexpected state"), {
+        code: "payment_intent_unexpected_state",
+        payment_intent: intent,
+      })
+
+    it("treats a fully captured payment intent as captured", async () => {
+      const service = new StripeProviderService({}, defaultOptions)
+      const intent = {
+        id: "pi_123",
+        status: "succeeded",
+        amount: 3000,
+        amount_received: 3000,
+      }
+      jest
+        .spyOn(service["stripe_"].paymentIntents, "capture")
+        .mockRejectedValue(unexpectedState(intent))
+
+      const result = await service.capturePayment({
+        data: { id: "pi_123", currency: "usd" },
+        amount: 30,
+      })
+
+      expect(result.data).toEqual(intent)
+    })
+
+    it("throws when capturing again after a partial capture", async () => {
+      const service = new StripeProviderService({}, defaultOptions)
+      jest.spyOn(service["stripe_"].paymentIntents, "capture").mockRejectedValue(
+        unexpectedState({
+          id: "pi_123",
+          status: "succeeded",
+          amount: 3000,
+          amount_received: 1000,
+        })
+      )
+
+      await expect(
+        service.capturePayment({
+          data: { id: "pi_123", currency: "usd" },
+          amount: 10,
+        })
+      ).rejects.toThrow("An error occurred in capturePayment")
+    })
+  })
+
   describe("cancelPayment", () => {
     it("throws when the payment intent already succeeded", async () => {
       const service = new StripeProviderService({}, defaultOptions)

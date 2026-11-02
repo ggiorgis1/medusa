@@ -893,6 +893,9 @@ export default class PaymentModuleService
         payment.provider_id,
         {
           data: payment.data!,
+          // Pass the captured amount so providers capture exactly what Medusa
+          // records, rather than the full authorized amount.
+          amount: capture?.raw_amount ?? capture?.amount,
           context: {
             idempotency_key: capture?.id,
           },

@@ -334,19 +334,35 @@ abstract class StripeBase extends AbstractPaymentProvider<StripeOptions> {
 
   async capturePayment({
     data,
+    amount,
     context,
   }: CapturePaymentInput): Promise<CapturePaymentOutput> {
     const id = data?.id as string
+    const currency = data?.currency as string | undefined
+
+    // Without amount_to_capture Stripe captures the full amount_capturable,
+    // so a partial capture in Medusa would charge the customer in full.
+    const params: Stripe.PaymentIntentCaptureParams = {}
+    if (isDefined(amount) && currency) {
+      params.amount_to_capture = getSmallestUnit(amount, currency)
+    }
 
     try {
-      const intent = await this.stripe_.paymentIntents.capture(id, {
+      const intent = await this.stripe_.paymentIntents.capture(id, params, {
         idempotencyKey: context?.idempotency_key,
       })
       return { data: intent as unknown as Record<string, unknown> }
     } catch (error) {
       if (error.code === ErrorCodes.PAYMENT_INTENT_UNEXPECTED_STATE) {
-        if (error.payment_intent?.status === ErrorIntentStatus.SUCCEEDED) {
-          return { data: error.payment_intent }
+        const intent = error.payment_intent
+        // Already captured in full: treat as captured. A PaymentIntent that
+        // was partially captured has released the rest of its authorization
+        // (Stripe allows one capture), so a further capture cannot succeed.
+        if (
+          intent?.status === ErrorIntentStatus.SUCCEEDED &&
+          !(intent.amount_received < intent.amount)
+        ) {
+          return { data: intent }
         }
       }
 
