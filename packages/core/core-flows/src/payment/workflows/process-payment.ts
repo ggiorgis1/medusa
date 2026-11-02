@@ -1,5 +1,5 @@
 import type { WebhookActionResult } from "@medusajs/framework/types"
-import { PaymentActions } from "@medusajs/framework/utils"
+import { MathBN, PaymentActions } from "@medusajs/framework/utils"
 import {
   createWorkflow,
   transform,
@@ -54,7 +54,7 @@ export const processPaymentWorkflow = createWorkflow(
 
     const paymentData = useQueryGraphStep({
       entity: "payment",
-      fields: ["id"],
+      fields: ["id", "captures.raw_amount"],
       filters: { payment_session_id: webhookData.session_id },
     }).config({
       name: "payment-query",
@@ -118,18 +118,45 @@ export const processPaymentWorkflow = createWorkflow(
       })
     })
 
-    when({ input, paymentData }, ({ input, paymentData }) => {
-      return (
-        !!input.data?.session_id &&
-        input.action === PaymentActions.SUCCESSFUL &&
-        !!paymentData.data.length
-      )
-    }).then(() => {
+    // The provider reports the total amount it has captured, which can include
+    // captures Medusa already recorded (e.g. a partial capture from the admin).
+    // Only capture what the provider received beyond those.
+    const captureFromWebhook = transform(
+      { paymentData, webhookData },
+      ({ paymentData, webhookData }) => {
+        const payment = paymentData.data[0]
+        if (!payment) {
+          return null
+        }
+        if (webhookData.amount == null) {
+          return { payment_id: payment.id, amount: undefined }
+        }
+        const alreadyCaptured = (payment.captures ?? []).reduce(
+          (acc, capture) => MathBN.add(acc, capture.raw_amount),
+          MathBN.convert(0)
+        )
+        const outstanding = MathBN.sub(webhookData.amount, alreadyCaptured)
+        return MathBN.gt(outstanding, 0)
+          ? { payment_id: payment.id, amount: outstanding }
+          : null
+      }
+    )
+
+    when(
+      { input, captureFromWebhook },
+      ({ input, captureFromWebhook }) => {
+        return (
+          !!input.data?.session_id &&
+          input.action === PaymentActions.SUCCESSFUL &&
+          !!captureFromWebhook
+        )
+      }
+    ).then(() => {
       capturePaymentWorkflow
         .runAsStep({
           input: {
-            payment_id: paymentData.data[0].id,
-            amount: webhookData.amount,
+            payment_id: captureFromWebhook!.payment_id,
+            amount: captureFromWebhook!.amount,
           },
         })
         .config({
