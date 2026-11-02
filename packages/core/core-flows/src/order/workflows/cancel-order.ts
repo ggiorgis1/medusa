@@ -3,6 +3,7 @@ import {
   OrderDTO,
   OrderWorkflow,
   PaymentCollectionDTO,
+  PaymentDTO,
 } from "@medusajs/framework/types"
 import {
   deepFlatMap,
@@ -18,6 +19,7 @@ import {
   createStep,
   createWorkflow,
   parallelize,
+  StepResponse,
   transform,
   when,
   WorkflowData,
@@ -104,6 +106,76 @@ export const cancelValidateOrder = createStep(
   }
 )
 
+/**
+ * The data to validate that an order's payments were refunded or canceled.
+ */
+export type ValidateOrderPaymentsSettledStepInput = {
+  /**
+   * The order, with its payments' captures and refunds as queried before the
+   * refunds were made.
+   */
+  order: OrderDTO
+  /**
+   * The payments that were refunded successfully.
+   */
+  refundedPayments: PaymentDTO[]
+  /**
+   * The IDs of uncaptured payments whose cancelation failed.
+   */
+  failedCancelPaymentIds: string[]
+}
+
+export const validateOrderPaymentsSettledStepId =
+  "validate-order-payments-settled"
+/**
+ * This step throws if a captured payment of the order wasn't refunded, or an
+ * uncaptured payment wasn't canceled, so that the order isn't canceled while
+ * the customer is still charged.
+ */
+export const validateOrderPaymentsSettledStep = createStep(
+  validateOrderPaymentsSettledStepId,
+  async ({
+    order,
+    refundedPayments,
+    failedCancelPaymentIds,
+  }: ValidateOrderPaymentsSettledStepInput) => {
+    const payments: PaymentDTO[] = deepFlatMap(
+      order,
+      "payment_collections.payments",
+      ({ payments }) => payments
+    )
+    const refundedIds = new Set((refundedPayments ?? []).map((p) => p.id))
+
+    const unrefunded = payments
+      .filter((payment) => {
+        const captured = (payment.captures ?? []).reduce(
+          (acc, capture) =>
+            MathBN.add(acc, capture.raw_amount ?? capture.amount),
+          MathBN.convert(0)
+        )
+        const refunded = (payment.refunds ?? []).reduce(
+          (acc, refund) => MathBN.add(acc, refund.raw_amount ?? refund.amount),
+          MathBN.convert(0)
+        )
+        return MathBN.gt(MathBN.sub(captured, refunded), 0)
+      })
+      .filter((payment) => !refundedIds.has(payment.id))
+      .map((payment) => payment.id)
+
+    const failed = [...unrefunded, ...(failedCancelPaymentIds ?? [])]
+    if (failed.length) {
+      throw new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE,
+        `Order ${order.id} was not canceled: could not refund or cancel payment(s) ${failed.join(
+          ", "
+        )}. Retry the cancelation.`
+      )
+    }
+
+    return new StepResponse(void 0)
+  }
+)
+
 export const cancelOrderWorkflowId = "cancel-order"
 /**
  * This workflow cancels an order. An order can only be canceled if it doesn't have
@@ -179,7 +251,7 @@ export const cancelOrderWorkflow = createWorkflow(
       return order.items?.map((i) => i.id)
     })
 
-    const [refundedPayments, deletedReservationIds] = parallelize(
+    const [refundedPayments, deletedReservationIds, canceledPayments] = parallelize(
       refundCapturedPaymentsWorkflow.runAsStep({
         input: { order_id: order.id, created_by: input.canceled_by },
       }),
@@ -190,6 +262,19 @@ export const cancelOrderWorkflow = createWorkflow(
         data: { id: order.id },
       })
     )
+
+    // Refund and cancelation failures are logged, not thrown, by the payment
+    // steps. Canceling the order anyway would leave the customer charged for a
+    // canceled order, so stop here: the workflow's compensation runs and the
+    // order stays as it was.
+    validateOrderPaymentsSettledStep({
+      order,
+      refundedPayments,
+      failedCancelPaymentIds: transform(
+        { canceledPayments },
+        ({ canceledPayments }) => canceledPayments?.failed_payment_ids ?? []
+      ),
+    })
 
     const reservationDeletedEvents = transform(
       { deletedReservationIds, order },

@@ -4,7 +4,7 @@ import {
   Modules,
   promiseAll,
 } from "@medusajs/framework/utils"
-import { createStep } from "@medusajs/framework/workflows-sdk"
+import { createStep, StepResponse } from "@medusajs/framework/workflows-sdk"
 
 /**
  * The data to cancel one or more payments.
@@ -33,10 +33,12 @@ export const cancelPaymentStep = createStep(
       : [input.paymentIds]
 
     const promises: Promise<any>[] = []
+    const failedPaymentIds: string[] = []
 
     for (const id of paymentIds) {
       promises.push(
         paymentModule.cancelPayment(id).catch((e) => {
+          failedPaymentIds.push(id)
           logger.error(
             `Error was thrown trying to cancel payment - ${id} - ${e}`
           )
@@ -45,5 +47,9 @@ export const cancelPaymentStep = createStep(
     }
 
     await promiseAll(promises)
+
+    // Callers that must not proceed when a cancelation failed (e.g. canceling
+    // an order) check the IDs returned here.
+    return new StepResponse({ failed_payment_ids: failedPaymentIds })
   }
 )
